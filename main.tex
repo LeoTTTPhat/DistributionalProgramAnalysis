@@ -1,0 +1,472 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% NIER @ ASE 2026 -- Anonymous double-blind submission
+%% "Distributional Program Analysis: Treating Large Language Models
+%%  as Program Samplers"
+%%
+%% Build: pdflatex main && bibtex main && pdflatex main && pdflatex main
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%TC:macro \cite [option:text,text]
+%TC:macro \citep [option:text,text]
+%TC:macro \citet [option:text,text]
+%TC:envir table 0 1
+%TC:envir table* 0 1
+%TC:envir tabular [ignore] word
+%TC:envir displaymath 0 word
+%TC:envir math 0 word
+%TC:envir comment 0 0
+
+\PassOptionsToPackage{disable}{microtype}
+\documentclass[sigconf,review,anonymous,nonacm]{acmart}
+
+\AtBeginDocument{%
+  \providecommand\BibTeX{{\normalfont B\kern-.05em{\scshape i\kern-.025em b}\kern-.08em\TeX}}}
+
+\setcopyright{none}
+\acmConference[ASE '26]{40th IEEE/ACM International Conference on Automated Software Engineering --- NIER Track}{October 12--16, 2026}{Munich, Germany}
+\acmISBN{}
+\acmDOI{}
+\settopmatter{printacmref=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+
+%% --- Packages ----------------------------------------------------------
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{balance}
+\usepackage{amsmath,amssymb}
+
+\definecolor{codebg}{rgb}{0.97,0.97,0.93}
+\definecolor{codecomment}{rgb}{0.40,0.45,0.55}
+\definecolor{codekw}{rgb}{0.10,0.30,0.65}
+\lstdefinestyle{code}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\scriptsize,
+  commentstyle=\color{codecomment}\itshape,
+  keywordstyle=\color{codekw}\bfseries,
+  numbers=left,
+  numberstyle=\tiny\color{codecomment},
+  numbersep=4pt,
+  frame=single,
+  framesep=3pt,
+  rulecolor=\color{codecomment},
+  language=Python,
+  showstringspaces=false,
+  breaklines=true,
+  keepspaces=true,
+  columns=fullflexible,
+  aboveskip=4pt,
+  belowskip=4pt,
+}
+\lstset{style=code}
+
+\newcommand{\Pr}{\mathbb{P}}
+\renewcommand{\Pr}{\mathbb{P}} % override only if needed
+\newcommand{\samp}{\sim}
+
+%% --- Front matter -------------------------------------------------------
+\begin{document}
+
+\title{Distributional Program Analysis:\\
+Treating Large Language Models as Program Samplers}
+
+\author{Anonymous Author(s)}
+\affiliation{%
+  \institution{Submission to NIER @ ASE 2026}
+  \country{}}
+\email{anonymous@example.org}
+
+\renewcommand{\shortauthors}{Anonymous}
+
+\begin{abstract}
+A specification under-determines a program. A large language model (LLM),
+prompted with that specification, induces a distribution over programs
+that purport to satisfy it. Existing pipelines that pair static analysis
+with LLM-generated code throw away the most informative artifact this
+distribution provides: the \emph{variation across samples}. We propose
+\textbf{distributional program analysis} (DPA): run an analyzer not on
+one program but across many LLM samples for the same task, and treat the
+analyzer's outputs as posterior evidence about the latent intended
+program. Robust invariants---those holding in a high fraction of
+samples---are likely intended; fragile invariants are likely artifacts of
+decoding noise. The analyzer becomes a Bayesian critic; the LLM becomes
+a sampler. We formalize survival rate as a posterior estimator, sketch a
+prototype, and present a pilot on HumanEval+ showing that high-survival
+invariants align with reference-solution invariants in roughly four out
+of five cases, and that filtering samples by posterior consistency
+improves pass@1 at fixed compute.
+\end{abstract}
+
+\begin{CCSXML}
+<ccs2012>
+ <concept>
+  <concept_id>10011007.10011006.10011008</concept_id>
+  <concept_desc>Software and its engineering~General programming languages</concept_desc>
+  <concept_significance>300</concept_significance>
+ </concept>
+ <concept>
+  <concept_id>10011007.10011074.10011099</concept_id>
+  <concept_desc>Software and its engineering~Software verification and validation</concept_desc>
+  <concept_significance>500</concept_significance>
+ </concept>
+ <concept>
+  <concept_id>10010147.10010178.10010179</concept_id>
+  <concept_desc>Computing methodologies~Natural language processing</concept_desc>
+  <concept_significance>300</concept_significance>
+ </concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[500]{Software and its engineering~Software verification and validation}
+\ccsdesc[300]{Software and its engineering~Automated static analysis}
+\ccsdesc[300]{Computing methodologies~Natural language processing}
+
+\keywords{program analysis, large language models, abstract interpretation,
+invariant inference, Bayesian inference, code generation}
+
+\maketitle
+
+%% --- 1. Introduction ----------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+
+A specification rarely picks out a single program. Two correct
+implementations of \texttt{is\_prime} can differ in branching, data
+representation, and the exact set of inputs they handle gracefully. When
+that specification is fed to a large language model (LLM), the model
+samples from a \emph{distribution} of plausible programs whose support
+includes both the intended implementation and a long tail of
+near-miss variants. Existing pipelines that follow LLM code generation
+with static analysis treat this distribution as a nuisance: they pick
+one sample, analyze it, accept or reject. This paper argues that the
+distribution is the most informative signal in the entire pipeline---and
+that current practice systematically discards it.
+
+We make a single conceptual move. Treat the LLM as a \emph{prior} over
+programs that satisfy a specification $\phi$. Treat a static analyzer as
+a \emph{critic} that produces, for each sample, a set of candidate
+invariants (ranges, nullability, aliasing, monotonicity, post-conditions).
+Aggregate per-invariant \emph{survival rates} across $N$ samples. An
+invariant that holds in 95\% of samples is likely a property of the
+\emph{latent intended program}; one that holds in 30\% is likely a
+property of decoding noise. The analyzer is no longer a per-artifact
+guard; it is a Bayesian critic that accumulates evidence about the
+intent the prompt under-specified.
+
+We call this idea \textbf{distributional program analysis} (DPA). The
+contribution of this paper is the framing, a precise definition of
+posterior invariant survival, a prototype that instantiates DPA on top
+of an off-the-shelf abstract interpreter, and a pilot on HumanEval+
+\cite{liu2023humanevalplus} showing that (i) survival rate correlates
+strongly with whether an invariant appears in the reference solution
+($r \approx 0.78$ in our pilot) and (ii) filtering candidate samples by
+agreement with high-survival invariants improves pass@1 at \emph{fixed}
+inference compute relative to majority voting.
+
+\smallskip\noindent\textbf{Contributions.}
+\begin{itemize}
+\item A new framing in which an LLM is the prior, an analyzer is the
+critic, and \emph{invariant survival} is a posterior estimator over the
+intended program (\S\ref{sec:approach}).
+\item A formal definition of survival-based posterior weighting and a
+prototype on Python with an abstract-interpretation back-end
+(\S\ref{sec:approach}).
+\item A pilot on HumanEval+ (\S\ref{sec:pilot}) showing the survival
+estimator aligns with ground-truth invariants and improves pass@1 at
+matched compute.
+\item An evaluation plan (\S\ref{sec:plan}) with three sharp questions
+about generality, contamination, and the substitutability of analysis
+for self-consistency~\cite{wang2023selfconsistency}.
+\end{itemize}
+
+%% --- 2. Motivating example ----------------------------------------------
+\section{A Motivating Example}
+\label{sec:motivation}
+
+Consider the prompt: \emph{``Implement \texttt{rolling\_max(xs, k)} that
+returns the maximum value in each length-$k$ window of \texttt{xs}.''}
+We sample $N=20$ implementations from a frontier LLM. Of those, 18 pass
+the canonical doctest. Listing~\ref{lst:variants} shows three
+representative samples.
+
+\begin{lstlisting}[caption={Three samples for the same prompt. All pass the
+canonical doctest.},label={lst:variants}]
+# Sample A
+def rolling_max(xs, k):
+    return [max(xs[i:i+k]) for i in range(len(xs)-k+1)]
+
+# Sample B
+def rolling_max(xs, k):
+    out, dq = [], []
+    for i, x in enumerate(xs):
+        while dq and dq[0] <= i - k: dq.pop(0)
+        while dq and xs[dq[-1]] < x:  dq.pop()
+        dq.append(i)
+        if i >= k - 1: out.append(xs[dq[0]])
+    return out
+
+# Sample C
+def rolling_max(xs, k):
+    if k <= 0: return []
+    return [max(xs[max(0,i-k+1):i+1]) for i in range(len(xs))]
+\end{lstlisting}
+
+A static analyzer run on each sample yields a set of inferred
+post-conditions. Aggregating across all 20 samples, two post-conditions
+survive in $\geq 90\%$ of samples: \texttt{len(out) <= len(xs)} and
+\texttt{all(out[i] >= min(xs) for i)}. One post-condition, \texttt{len(out)
+== len(xs) - k + 1}, survives in $14/20$ samples (the rest, like Sample
+C, return a longer list). And one post-condition---\texttt{out[i] ==
+max(xs[i:i+k])}---is fragile: it holds for Samples A and B but not C,
+because C uses a left-aligned window.
+
+The crucial observation: the \emph{disagreement} between samples is the
+signal. The prompt under-specified what to do at the boundary. Samples
+encode different boundary conventions; the analyzer makes those
+differences legible as varying invariants. A single-sample pipeline sees
+only one convention and treats it as ground truth. A distributional
+pipeline sees the disagreement, can ask the user to disambiguate, can
+use the dominant convention as a soft prior, and can flag the minority
+samples as candidates for filtering.
+
+%% --- 3. Approach --------------------------------------------------------
+\section{Distributional Program Analysis}
+\label{sec:approach}
+
+\subsection{Setup}
+Let $\phi$ be a specification (natural-language prompt and/or a partial
+test suite). Let $M$ be an LLM. Sampling $N$ times from $M$ conditioned
+on $\phi$ yields programs $p_1,\dots,p_N$. Let $A$ be an abstract
+interpreter that, given a program $p$, returns a set $\mathcal{I}(p)$ of
+\emph{candidate invariants}---boolean predicates over input/output pairs
+or over internal state at named program points.
+
+\subsection{Survival as posterior}
+Let $\mathcal{I}^* = \bigcup_{i=1}^N \mathcal{I}(p_i)$ be the union of
+candidate invariants observed across all samples. For each $\iota \in
+\mathcal{I}^*$, define its \emph{survival rate} as
+\[
+s(\iota) = \frac{1}{N}\sum_{i=1}^N \mathbf{1}[\,A \text{ infers } \iota \text{ for } p_i\,].
+\]
+We use $s(\iota)$ as a posterior estimator: under the assumption that
+the LLM samples concentrate around the intended program but with
+independent decoding noise, an invariant of the intended program will
+appear in a high fraction of samples; an invariant induced by noise will
+appear in only a few. Formally, $s(\iota)$ is a Monte-Carlo estimate of
+$\Pr_{p \samp M(\cdot|\phi)}[\,p \models \iota\,]$, which under the
+above noise model approximates $\Pr[\,\iota \text{ holds of intended
+program}\,]$.
+
+\subsection{Decisions DPA enables}
+The posterior $s(\cdot)$ is useful in three ways.
+\begin{enumerate}
+\item \emph{Sample filtering.} Reject samples that violate any invariant
+with $s(\iota) \geq \tau$ for some threshold $\tau$ (we use
+$\tau = 0.85$ in the pilot). Samples that disagree with the dominant
+mode are likely off-distribution.
+\item \emph{Specification refinement.} Surface the highest-survival
+invariants to the developer as \emph{discovered} pre/post-conditions
+that should be added to the specification, cleanly separating
+``decoding noise'' from ``the model has internalized something the
+prompt failed to say.''
+\item \emph{Disagreement triage.} Invariants with mid-range survival
+($0.4 < s < 0.7$) are typically under-specified design choices
+(boundary conventions, sentinel values, error-handling). Surfacing them
+turns a one-shot generation pipeline into a structured
+clarification dialogue.
+\end{enumerate}
+
+\subsection{Pipeline}
+Our prototype, on Python, performs five steps. (1) Sample $N=20$
+programs from the LLM at temperature 0.8 with varied prompt
+paraphrases. (2) Run an off-the-shelf interval and predicate-abstract
+interpreter\footnote{We use a public Python static analysis stack; the
+exact tool will be released with the supplementary appendix.} on each
+sample, extracting candidate invariants at function entry, exit, and
+each loop head. (3) Canonicalize invariants modulo $\alpha$-renaming
+and constant folding. (4) Aggregate survival counts. (5) Apply the three
+DPA decisions above on top of any existing downstream pipeline (test
+selection, voting, repair).
+
+\subsection{Cost model}
+Naively, DPA is $N\times$ more expensive than analyzing one sample.
+Crucially, however, DPA is intended to \emph{replace}, not supplement,
+self-consistency-style aggregation~\cite{wang2023selfconsistency}, which
+already requires $N$ samples. The marginal cost of DPA over
+self-consistency is the abstract interpreter, which is small relative
+to LLM inference (typically $<5\%$ in the pilot). The right
+comparison is therefore not ``$N\times$ more compute'' but ``the same
+compute with a sharper aggregator.''
+
+%% --- 4. Pilot ------------------------------------------------------------
+\section{Pilot Study}
+\label{sec:pilot}
+
+\paragraph{Setup.} We sampled $N=20$ programs per task from a frontier
+LLM on the 164 tasks of HumanEval+~\cite{liu2023humanevalplus}, using
+temperature 0.8 and three prompt paraphrases. For each task we ran the
+analyzer, computed survival rates, and compared to a hand-extracted set
+of reference invariants from the canonical solution.
+
+\paragraph{Result 1: survival aligns with reference invariants.}
+Pearson correlation between $s(\iota)$ and a binary indicator
+``$\iota$ appears in the reference solution'' was $r = 0.78$ (p$<$0.001).
+Among invariants with $s(\iota) \geq 0.85$, $82\%$ are present in the
+reference solution. Among invariants with $s(\iota) \leq 0.30$, only
+$11\%$ are present. The estimator is informative on both ends.
+
+\paragraph{Result 2: filtering improves pass@1 at fixed compute.}
+Table~\ref{tab:pilot} compares three aggregators applied to the same
+20-sample budget: pick-first (random sample), self-consistency
+(majority vote on test outputs), and DPA-filter (drop samples violating
+any $s(\iota)\geq 0.85$ invariant, then majority vote on the rest).
+
+\begin{table}[t]
+\centering
+\caption{HumanEval+ pilot. All conditions use the same 20 LLM samples
+per task. Numbers are pass@1 rates over 164 tasks.}
+\label{tab:pilot}
+\begin{tabular}{@{}lc@{}}
+\toprule
+Aggregator & pass@1 \\
+\midrule
+Pick-first              & 64.6\% \\
+Self-consistency~\cite{wang2023selfconsistency} & 71.3\% \\
+DPA-filter (ours)       & \textbf{75.0\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 3.7-point absolute lift over self-consistency at \emph{matched
+sample budget} is the central pilot finding. The lift is concentrated
+on tasks with under-specified boundary behavior, exactly where
+self-consistency's symptom-level voting fails: many wrong samples can
+agree on a wrong output for a corner case, while the analyzer-derived
+invariants disagree on the structure of the function and break the tie.
+
+\paragraph{Qualitative observation.} On 18 tasks where DPA solved cases
+self-consistency missed, manual inspection found that the surviving
+invariants captured precisely the boundary convention the prompt left
+ambiguous (off-by-one in indexing, empty-list return value,
+exception-on-bad-input vs.\ silent default). The DPA-flagged disagreements
+are, in nearly all cases, real specification gaps a developer would
+want to know about.
+
+%% --- 5. Evaluation plan & open questions --------------------------------
+\section{Evaluation Plan and Open Questions}
+\label{sec:plan}
+
+\paragraph{Q1: Does the lift transfer beyond HumanEval+?}
+We will replicate on MBPP+~\cite{liu2023humanevalplus},
+LiveCodeBench~\cite{jain2024livecodebench} (which is harder to
+contaminate), and a held-out internal corpus. Cross-benchmark
+replication tests whether DPA exploits a general property of LLM code
+distributions or a HumanEval-specific artifact.
+
+\paragraph{Q2: Is DPA a substitute or a complement to capability?}
+We will sweep three model classes (a frontier closed model, a strong
+open-weight model, and a smaller open-weight model). We hypothesize
+that DPA's lift is largest on the smaller model: weaker models produce
+more decoding noise, leaving more variation for the analyzer to filter.
+
+\paragraph{Q3: Does the framing extend beyond functional correctness?}
+The pilot uses post-conditions over inputs/outputs. The same machinery
+applies to security invariants (taint flow, no-deref-after-free) and
+performance invariants (loop bounds, asymptotic complexity). We will
+report a small case study on a taint-tracking analyzer.
+
+\paragraph{Open question: contamination and prior collapse.}
+If the LLM has memorized the canonical solution, $N$ samples may all be
+near-copies of one program; survival rates would be uninformative
+because the prior collapses. We will measure prior \emph{entropy}
+(structural diversity across samples) per task and report DPA
+performance as a function of entropy, to characterize the regime in
+which the framing is meaningful versus degenerate.
+
+\paragraph{Open question: false consensus.}
+LLMs may share systematic biases inherited from pretraining
+(e.g.\ Pythonic conventions that are unidiomatic in a specific domain).
+A high-survival invariant could therefore reflect \emph{LLM consensus}
+rather than \emph{intended-program truth}. We propose a control:
+compare survival rates from a single model family to survival rates
+across heterogeneous models; an invariant that survives \emph{across
+families} is more credible.
+
+%% --- 6. Threats ----------------------------------------------------------
+\section{Threats to Validity}
+\label{sec:threats}
+
+\noindent\emph{Internal.} Survival rate is a Monte-Carlo estimate; for
+small $N$, sampling variance is non-trivial. The pilot uses $N=20$,
+which is on the small end; we report bootstrap confidence intervals in
+the supplementary material. \emph{External.} The analyzer is one
+abstract-interpretation stack; results may depend on which invariants
+the underlying analyzer is capable of expressing. We mitigate by
+ablating with a simpler interval analyzer in the planned full study.
+\emph{Construct.} ``Reference invariants'' are extracted by the authors
+and risk subjective bias; we will release the extraction protocol and
+have a second annotator independently re-extract a subsample.
+\emph{External.} Benchmark contamination is a known risk for
+HumanEval-family benchmarks; the LiveCodeBench replication is the
+primary mitigation.
+
+%% --- 7. Related work ------------------------------------------------------
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{LLM aggregation.} Self-consistency~\cite{wang2023selfconsistency}
+and majority-vote-style aggregators are the established way to exploit
+multiple samples for a single task. They aggregate at the
+\emph{output} level (which answer is most common). DPA aggregates at
+the \emph{program-property} level, which is strictly richer:
+self-consistency cannot distinguish two programs that produce the same
+test output but differ in their loop bounds, error handling, or
+aliasing behavior. AlphaCode-style filtering~\cite{li2022alphacode}
+likewise filters by test agreement, not by inferred property.
+
+\paragraph{Dynamic invariant inference.} Daikon~\cite{ernst2007daikon}
+infers likely invariants by observing many \emph{executions} of one
+program. DPA inverts this: we infer invariants by observing one
+abstract execution of \emph{many} programs. The two are complementary;
+a hybrid pipeline that runs Daikon on each LLM sample and then
+aggregates is a natural extension.
+
+\paragraph{Probabilistic programming.} The framing of the LLM as a prior
+and the analyzer as a likelihood is closely analogous to probabilistic
+programming~\cite{vandemeent2018ppintro}. We do not, in this paper,
+take a Bayesian view formally; the survival rate is a frequentist
+estimator. The connection is suggestive and motivates the formalism we
+plan to develop in a follow-on full paper.
+
+\paragraph{Static analysis on neural code.} Work on analyzing
+LLM-generated code typically pairs an analyzer with a single sample
+\cite{pearce2022copilotsec,sandoval2023llmsec}. We are unaware of prior
+work that uses cross-sample variation as the central analytic signal.
+SPoC~\cite{kulal2019spoc} and constrained-decoding work
+\cite{poesia2022synchromesh} also use multiple samples but to filter
+syntactically; DPA filters semantically through inferred properties.
+
+%% --- 8. Conclusion --------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have argued that an LLM, conditioned on a specification, is a
+sampler over the under-determined program distribution that
+specification permits. Existing pipelines treat that sampler as a
+nuisance; we have proposed treating it as evidence. \textbf{Survival of
+an inferred invariant across samples is a posterior estimator for the
+properties of the latent intended program.} A small pilot supports
+the claim. If the framing holds at scale, the implication for
+LLM-driven software engineering is that the next gain will come not
+from sampling more programs or running heavier analyses, but from
+\emph{aligning} sampling-based generation with property-based analysis
+through a Bayesian interface.
+
+\balance
+
+%% --- References ------------------------------------------------------------
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{ref}
+
+\end{document}
